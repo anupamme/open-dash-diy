@@ -7,11 +7,45 @@
  *   httpRequest.defaults({ encoding: null }).get(url, cb)
  */
 
+const dns = require('dns');
+const net = require('net');
+
 function buildOptions(input) {
     if (typeof input === 'string') {
         return { url: input };
     }
     return Object.assign({}, input || {});
+}
+
+// Blocks SSRF by rejecting requests that resolve to private/loopback/link-local
+// or other internal-only IP ranges before the request is ever sent.
+function isPrivateAddress(ip) {
+    const type = net.isIP(ip);
+    if (type === 4) {
+        const parts = ip.split('.').map(Number);
+        return parts[0] === 10 ||
+            parts[0] === 127 ||
+            (parts[0] === 169 && parts[1] === 254) ||
+            (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) ||
+            (parts[0] === 192 && parts[1] === 168) ||
+            parts[0] === 0;
+    }
+    if (type === 6) {
+        const lower = ip.toLowerCase();
+        return lower === '::1' || lower.startsWith('fe80:') || lower.startsWith('fc') || lower.startsWith('fd');
+    }
+    return true;
+}
+
+async function assertPublicUrl(url) {
+    const hostname = new URL(url).hostname;
+    if (hostname.toLowerCase() === 'localhost' || isPrivateAddress(hostname)) {
+        throw new Error('httpRequest: refusing to request internal/private address');
+    }
+    const results = await dns.promises.lookup(hostname, { all: true, verbatim: true });
+    if (results.some((r) => isPrivateAddress(r.address))) {
+        throw new Error('httpRequest: refusing to request internal/private address');
+    }
 }
 
 function httpRequest(input, callback) {
